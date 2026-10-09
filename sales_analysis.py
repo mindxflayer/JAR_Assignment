@@ -1,127 +1,154 @@
-# ==============================================================================
-# JAR GROWTH INTERN ASSIGNMENT - QUESTION 1, PART A: SALES & PROFITABILITY ANALYSIS
-# ==============================================================================
+# Question 1, Part A: Sales and Profitability Analysis
+# Simple step-by-step script using basic pandas + matplotlib
 
 import pandas as pd
-import pdfplumber
+import matplotlib
+matplotlib.use("Agg")          # lets charts be saved to files without opening a window
 import matplotlib.pyplot as plt
 
-# ------------------------------------------------------------------------------
-# STEP 1: Load Datasets from PDF Files
-# ------------------------------------------------------------------------------
-# Function to extract tabular data from a PDF file using pdfplumber
-def load_pdf_table(pdf_filepath):
-    table_rows = []
-    header_columns = None
-    
-    with pdfplumber.open(pdf_filepath) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    # Skip empty rows
-                    if not row or all(cell is None or cell == '' for cell in row):
-                        continue
-                    # Set the first non-empty row as headers
-                    if header_columns is None:
-                        header_columns = [col.strip() for col in row if col and col.strip() != '']
-                    else:
-                        # Skip repeated header rows across PDF pages
-                        if [c.strip() for c in row if c and c.strip() != ''] == header_columns:
-                            continue
-                        table_rows.append(row[:len(header_columns)])
-                        
-    # Create DataFrame and clean column names
-    df = pd.DataFrame(table_rows, columns=header_columns)
-    return df
+# ---------------------------------------------------------------
+# STEP 1: Load the data
+# NOTE: the uploaded files are Excel (.xlsx) files, not PDFs,
+# so we use pd.read_excel (no PDF table extraction is needed).
+# Change the folder below if your files are somewhere else.
+# ---------------------------------------------------------------
+folder = ""   # e.g. "C:/Users/you/Downloads/" ; leave empty if files are next to this script
 
-print("Loading 'List of Orders.pdf' and 'Order Details.pdf'...")
-df_orders = load_pdf_table("List_of_Orders.pdf")
-df_details = load_pdf_table("Order_Details.pdf")
+orders = pd.read_excel(folder + "List_of_Orders.xlsx")
+details = pd.read_excel(folder + "Order_Details.xlsx")
 
-print(f"List of Orders loaded: {len(df_orders)} rows")
-print(f"Order Details loaded: {len(df_details)} rows")
+print("Orders shape:", orders.shape)
+print("Details shape:", details.shape)
 
-# ------------------------------------------------------------------------------
-# STEP 2: Data Cleaning and Type Conversion
-# ------------------------------------------------------------------------------
-# Convert numeric columns in Order Details to proper numeric data types
-df_details['Amount'] = pd.to_numeric(df_details['Amount'], errors='coerce')
-df_details['Profit'] = pd.to_numeric(df_details['Profit'], errors='coerce')
-df_details['Quantity'] = pd.to_numeric(df_details['Quantity'], errors='coerce')
+# ---------------------------------------------------------------
+# STEP 2: Check column names and data types
+# ---------------------------------------------------------------
+print("\nOrders columns and types:")
+print(orders.dtypes)
+print("\nDetails columns and types:")
+print(details.dtypes)
 
-# Drop any rows with missing essential values
-df_details = df_details.dropna(subset=['Order ID', 'Amount', 'Profit', 'Category'])
+# ---------------------------------------------------------------
+# STEP 3: Clean the data (missing / invalid values)
+# ---------------------------------------------------------------
+# Remove extra spaces in text columns
+orders["Order ID"] = orders["Order ID"].astype(str).str.strip()
+details["Order ID"] = details["Order ID"].astype(str).str.strip()
+details["Category"] = details["Category"].astype(str).str.strip()
 
-# ------------------------------------------------------------------------------
-# STEP 3: Merge Datasets and Check for Unmatched Rows
-# ------------------------------------------------------------------------------
-# Merge Order Details with List of Orders on 'Order ID'
-merged_df = pd.merge(df_details, df_orders, on='Order ID', how='left', indicator=True)
+# Make sure Amount and Profit are numbers (bad values become NaN)
+details["Amount"] = pd.to_numeric(details["Amount"], errors="coerce")
+details["Profit"] = pd.to_numeric(details["Profit"], errors="coerce")
 
-# Check if any order detail rows failed to match an order
-unmatched_count = (merged_df['_merge'] != 'both').sum()
-print(f"\nUnmatched order detail rows: {unmatched_count}")
+# Count missing values
+print("\nMissing values in details:")
+print(details.isna().sum())
 
-# ------------------------------------------------------------------------------
-# STEP 4: Calculate Category Sales and Profitability Metrics
-# ------------------------------------------------------------------------------
-# Group by Category and calculate metrics
-# Definition:
-# - Total Sales = sum of 'Amount' for each category
-# - Total Profit = sum of 'Profit' for each category
-# - Distinct Orders = count of unique 'Order ID's containing items from each category
-# - Average Profit Per Order = Total Profit / Distinct Orders
-# - Profit Margin (%) = (Total Profit / Total Sales) * 100
+# Drop rows where Amount, Profit or Category is missing
+rows_before = len(details)
+details = details.dropna(subset=["Amount", "Profit", "Category"])
+print("Rows dropped because of missing values:", rows_before - len(details))
 
-category_summary = df_details.groupby('Category').agg(
-    Total_Sales=('Amount', 'sum'),
-    Total_Profit=('Profit', 'sum'),
-    Distinct_Orders=('Order ID', 'nunique')
+# Check for duplicate Order IDs in the orders table
+# (duplicates here would double-count sales after merging)
+duplicate_orders = orders["Order ID"].duplicated().sum()
+print("Duplicate Order IDs in orders table:", duplicate_orders)
+if duplicate_orders > 0:
+    orders = orders.drop_duplicates(subset="Order ID")
+
+# ---------------------------------------------------------------
+# STEP 4: Check Order IDs match, then merge
+# ---------------------------------------------------------------
+unmatched = details[~details["Order ID"].isin(orders["Order ID"])]
+print("\nOrder-detail rows with no matching order:", len(unmatched))
+
+# 'left' merge keeps every detail row; each detail row matches one order
+merged = details.merge(orders, on="Order ID", how="left")
+print("Rows after merge:", len(merged), "(should equal rows in details:", len(details), ")")
+
+# ---------------------------------------------------------------
+# STEP 5: Total sales and total profit per category
+# Each row of 'merged' is one product line, so summing it does not double count.
+# ---------------------------------------------------------------
+summary = merged.groupby("Category").agg(
+    Total_Sales=("Amount", "sum"),
+    Total_Profit=("Profit", "sum"),
 ).reset_index()
 
-# Calculate Average Profit Per Order and Profit Margin (%)
-category_summary['Average Profit Per Order'] = category_summary['Total_Profit'] / category_summary['Distinct_Orders']
-category_summary['Profit Margin (%)'] = (category_summary['Total_Profit'] / category_summary['Total_Sales']) * 100
+# ---------------------------------------------------------------
+# STEP 6: Average profit per order
+# Definition: total profit of the category / number of DISTINCT orders
+# that contain that category.
+# ---------------------------------------------------------------
+orders_per_category = merged.groupby("Category")["Order ID"].nunique().reset_index()
+orders_per_category.columns = ["Category", "Number_of_Orders"]
 
-# Format column names for presentation
-summary_table = category_summary.rename(columns={
-    'Total_Sales': 'Total Sales',
-    'Total_Profit': 'Total Profit'
-})
+summary = summary.merge(orders_per_category, on="Category")
+summary["Average_Profit_Per_Order"] = summary["Total_Profit"] / summary["Number_of_Orders"]
 
-print("\n=================== SALES & PROFITABILITY SUMMARY ===================")
-print(summary_table.to_string(index=False))
+# ---------------------------------------------------------------
+# STEP 7: Profit margin (%) = Total Profit / Total Sales * 100
+# ---------------------------------------------------------------
+summary["Profit_Margin_Pct"] = summary["Total_Profit"] / summary["Total_Sales"] * 100
 
-# Save summary table to CSV
-summary_table.to_csv("sales_profitability_summary.csv", index=False)
-print("\nSummary saved to 'sales_profitability_summary.csv'")
+# Round for neat display
+summary["Average_Profit_Per_Order"] = summary["Average_Profit_Per_Order"].round(2)
+summary["Profit_Margin_Pct"] = summary["Profit_Margin_Pct"].round(2)
 
-# ------------------------------------------------------------------------------
-# STEP 5: Generate Charts
-# ------------------------------------------------------------------------------
-# Chart 1: Total Sales by Category
-plt.figure(figsize=(7, 4.5))
-plt.bar(summary_table['Category'], summary_table['Total Sales'], color=['#3498db', '#2ecc71', '#e74c3c'])
-plt.title('Total Sales by Category')
-plt.xlabel('Category')
-plt.ylabel('Total Sales (INR)')
-for i, v in enumerate(summary_table['Total Sales']):
-    plt.text(i, v + 2000, f"INR {v:,.0f}", ha='center', fontweight='bold')
+# Sort by total sales (highest first)
+summary = summary.sort_values("Total_Sales", ascending=False).reset_index(drop=True)
+
+# Final table with the requested column names
+final_table = summary[["Category", "Total_Sales", "Total_Profit",
+                       "Average_Profit_Per_Order", "Profit_Margin_Pct"]].copy()
+final_table.columns = ["Category", "Total Sales", "Total Profit",
+                       "Average Profit Per Order", "Profit Margin (%)"]
+
+print("\n===== SUMMARY TABLE =====")
+print(final_table.to_string(index=False))
+print("\nNumber of distinct orders per category:")
+print(summary[["Category", "Number_of_Orders"]].to_string(index=False))
+
+# Sanity check: category totals must equal overall totals
+print("\nCheck - sum of category sales:", summary["Total_Sales"].sum(),
+      "| sum of Amount column:", details["Amount"].sum())
+print("Check - sum of category profit:", summary["Total_Profit"].sum(),
+      "| sum of Profit column:", details["Profit"].sum())
+
+# ---------------------------------------------------------------
+# STEP 8: Best and worst categories for each measure
+# ---------------------------------------------------------------
+print("\n===== BEST AND WORST =====")
+measures = ["Total Sales", "Average Profit Per Order", "Profit Margin (%)"]
+for measure in measures:
+    best_row = final_table.loc[final_table[measure].idxmax()]
+    worst_row = final_table.loc[final_table[measure].idxmin()]
+    print(measure, "-> Best:", best_row["Category"], "(", best_row[measure], ")",
+          "| Worst:", worst_row["Category"], "(", worst_row[measure], ")")
+
+# ---------------------------------------------------------------
+# STEP 9: Save the table and the charts
+# ---------------------------------------------------------------
+final_table.to_csv("category_summary.csv", index=False)
+
+# Chart 1: total sales by category
+plt.figure(figsize=(6, 4))
+plt.bar(final_table["Category"], final_table["Total Sales"], color="steelblue")
+plt.title("Total Sales by Category")
+plt.xlabel("Category")
+plt.ylabel("Total Sales (Amount)")
 plt.tight_layout()
-plt.savefig('total_sales_by_category.png', dpi=300)
+plt.savefig("total_sales_by_category.png")
 plt.close()
 
-# Chart 2: Profit Margin (%) by Category
-plt.figure(figsize=(7, 4.5))
-plt.bar(summary_table['Category'], summary_table['Profit Margin (%)'], color=['#3498db', '#2ecc71', '#e74c3c'])
-plt.title('Profit Margin (%) by Category')
-plt.xlabel('Category')
-plt.ylabel('Profit Margin (%)')
-for i, v in enumerate(summary_table['Profit Margin (%)']):
-    plt.text(i, v + 0.2, f"{v:.2f}%", ha='center', fontweight='bold')
+# Chart 2: profit margin by category
+plt.figure(figsize=(6, 4))
+plt.bar(final_table["Category"], final_table["Profit Margin (%)"], color="seagreen")
+plt.title("Profit Margin (%) by Category")
+plt.xlabel("Category")
+plt.ylabel("Profit Margin (%)")
 plt.tight_layout()
-plt.savefig('profit_margin_by_category.png', dpi=300)
+plt.savefig("profit_margin_by_category.png")
 plt.close()
 
-print("Charts saved: 'total_sales_by_category.png' and 'profit_margin_by_category.png'")
+print("\nSaved: category_summary.csv, total_sales_by_category.png, profit_margin_by_category.png")
